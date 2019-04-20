@@ -136,6 +136,13 @@
 #define SAFE_IDX      0
 #define SAFE_IDX_MASK (1 << SAFE_IDX)
 
+#define YEAR        2018
+#define MOUNT       3
+#define DAY         19
+#define WEEK        12
+#define HOUR        0
+#define MINUTE      0
+#define SECOND      0
 
 
 #define STRING_EOL    "\r\n"
@@ -173,6 +180,13 @@ const uint32_t PLAY_Y = 440;
 uint32_t convert_axis_system_x(uint32_t touch_y);
 uint32_t convert_axis_system_y(uint32_t touch_x);
 void update_screen(uint32_t tx, uint32_t ty, uint32_t status);
+static void RTT_init(uint16_t pllPreScale, uint32_t IrqNPulses);
+void update_timer();
+void led_update();
+void TC_init(Tc * TC, int ID_TC, int TC_CHANNEL, int freq);
+void RTC_init(void);
+void draw_play_pause(Bool is_on);
+void font_draw_text(tFont *font, const char *text, int x, int y, int spacing);
 
 /************************************************************************/
 /* variaveis globais                                                  */
@@ -182,10 +196,66 @@ volatile t_ciclo *ciclo; /* Inicia os ciclos */
 volatile Bool is_on = 0;
 volatile Bool is_locked =0;
 volatile Bool safety = 0;
-
+volatile Bool flag = 0;
+volatile Bool f_rtt_alarme = false;
+volatile int seg=0;
+volatile int minu=0;
+volatile int tempo=0;
 /************************************************************************/
 /* handler / callbacks                                                  */
 /************************************************************************/
+
+void RTC_Handler(void)
+{
+	uint32_t ul_status = rtc_get_status(RTC);
+
+	/*Verifica por qual motivo entro na interrupcao, se foi por segundo ou Alarm*/
+	if ((ul_status & RTC_SR_SEC) == RTC_SR_SEC) {
+		rtc_clear_status(RTC, RTC_SCCR_SECCLR);
+	}
+	
+	/* Time or date alarm */
+	if ((ul_status & RTC_SR_ALARM) == RTC_SR_ALARM) {
+			rtc_clear_status(RTC, RTC_SCCR_ALRCLR);
+
+			
+	}
+	
+	rtc_clear_status(RTC, RTC_SCCR_ACKCLR);
+	rtc_clear_status(RTC, RTC_SCCR_TIMCLR);
+	rtc_clear_status(RTC, RTC_SCCR_CALCLR);
+	rtc_clear_status(RTC, RTC_SCCR_TDERRCLR);
+	
+}
+	
+void TC1_Handler(void){
+	volatile uint32_t ul_dummy;
+
+	ul_dummy = tc_get_status(TC0, 1);
+
+	/* Avoid compiler warning */
+	UNUSED(ul_dummy);
+
+	led_update();
+	
+	if (is_on){
+		seg++;
+	
+	if (seg==60)
+	{
+		seg=0;
+		minu++;
+	}
+	update_timer();
+
+	if (minu==tempo)
+	{
+		update_screen(PLAY_X,PLAY_Y,0x20);
+		font_draw_text(&calibri_36, "LAVAGEM ", 60, 10, 2);
+		font_draw_text(&calibri_36, "CONCLUIDA!", 60, 45, 2);
+	}
+	}
+}
 
 void mxt_handler(struct mxt_device *device)
 {
@@ -231,19 +301,42 @@ void mxt_handler(struct mxt_device *device)
 	}
 }
 
+void RTT_Handler(void)
+{
+	uint32_t ul_status;
+
+	/* Get RTT status */
+	ul_status = rtt_get_status(RTT);
+
+	/* IRQ due to Time has changed */
+	if ((ul_status & RTT_SR_RTTINC) == RTT_SR_RTTINC) {  }
+
+	/* IRQ due to Alarm */
+	if ((ul_status & RTT_SR_ALMS) == RTT_SR_ALMS) {
+		
+		
+	}
+}
+
 void PORTA_callback(void){
 	if (!is_on){
 		porta_aberta = !porta_aberta;
+		if (!flag){
+			ili9488_set_foreground_color(COLOR_CONVERT(COLOR_WHITE));
+			ili9488_draw_filled_rectangle(0, 0, 64,64);
+			//flag=!flag;
+		}
+		
 	}
-
 }
 
 void safe_callback(void){
-		safety = !safety;
+	safety = !safety;
 }
 /************************************************************************/
 /* inits / configs                                                */
 /************************************************************************/
+
 t_ciclo *initMenuOrder(){
 	c_rapido.previous = &c_enxague;
 	c_rapido.next = &c_diario;
@@ -261,6 +354,58 @@ t_ciclo *initMenuOrder(){
 	c_centrifuga.next = &c_rapido;
 
 	return(&c_diario);
+}
+
+void TC_init(Tc * TC, int ID_TC, int TC_CHANNEL, int freq){
+	uint32_t ul_div;
+	uint32_t ul_tcclks;
+	uint32_t ul_sysclk = sysclk_get_cpu_hz();
+
+	uint32_t channel = 1;
+
+	/* Configura o PMC */
+	/* O TimerCounter é meio confuso
+	o uC possui 3 TCs, cada TC possui 3 canais
+	TC0 : ID_TC0, ID_TC1, ID_TC2
+	TC1 : ID_TC3, ID_TC4, ID_TC5
+	TC2 : ID_TC6, ID_TC7, ID_TC8
+	*/
+	pmc_enable_periph_clk(ID_TC);
+
+	/** Configura o TC para operar em  4Mhz e interrupçcão no RC compare */
+	tc_find_mck_divisor(freq, ul_sysclk, &ul_div, &ul_tcclks, ul_sysclk);
+	tc_init(TC, TC_CHANNEL, ul_tcclks | TC_CMR_CPCTRG);
+	tc_write_rc(TC, TC_CHANNEL, (ul_sysclk / ul_div) / freq);
+
+	/* Configura e ativa interrupçcão no TC canal 0 */
+	/* Interrupção no C */
+	NVIC_EnableIRQ((IRQn_Type) ID_TC);
+	tc_enable_interrupt(TC, TC_CHANNEL, TC_IER_CPCS);
+
+	/* Inicializa o canal 0 do TC */
+	tc_start(TC, TC_CHANNEL);
+}
+
+void RTC_init(){
+	/* Configura o PMC */
+	pmc_enable_periph_clk(ID_RTC);
+
+	/* Default RTC configuration, 24-hour mode */
+	rtc_set_hour_mode(RTC, 0);
+
+	/* Configura data e hora manualmente */
+	rtc_set_date(RTC, YEAR, MOUNT, DAY, WEEK);
+	rtc_set_time(RTC, HOUR, MINUTE, SECOND);
+
+	/* Configure RTC interrupts */
+	NVIC_DisableIRQ(RTC_IRQn);
+	NVIC_ClearPendingIRQ(RTC_IRQn);
+	NVIC_SetPriority(RTC_IRQn, 0);
+	NVIC_EnableIRQ(RTC_IRQn);
+
+	/* Ativa interrupcao via alarme */
+	rtc_enable_interrupt(RTC,  RTC_IER_ALREN);
+
 }
 
 static void configure_console(void)
@@ -410,9 +555,35 @@ void io_init(void)
 	safe_callback);
 
 }
+
+static void RTT_init(uint16_t pllPreScale, uint32_t IrqNPulses)
+{
+	uint32_t ul_previous_time;
+
+	/* Configure RTT for a 1 second tick interrupt */
+	rtt_sel_source(RTT, false);
+	rtt_init(RTT, pllPreScale);
+	
+	ul_previous_time = rtt_read_timer_value(RTT);
+	
+	while (ul_previous_time > rtt_read_timer_value(RTT));
+	
+	rtt_write_alarm_time(RTT, IrqNPulses+ul_previous_time);
+
+	/* Enable RTT interrupt */
+	NVIC_DisableIRQ(RTT_IRQn);
+	NVIC_ClearPendingIRQ(RTT_IRQn);
+	NVIC_SetPriority(RTT_IRQn, 0);
+	NVIC_EnableIRQ(RTT_IRQn);
+	rtt_enable_interrupt(RTT, RTT_MR_ALMIEN);
+}
 /************************************************************************/
 /* funções                                                              */
 /************************************************************************/
+
+static float get_time_rtt(){
+	uint ul_previous_time = rtt_read_timer_value(RTT);
+}
 
 void font_draw_text(tFont *font, const char *text, int x, int y, int spacing) {
 	char *p = text;
@@ -434,7 +605,6 @@ void draw_screen(void) {
 	
 }
 
-
 void draw_lock(uint32_t is_locked) {
 
 	//-LOCK_W/2+LOCK_BORDER
@@ -447,7 +617,7 @@ void draw_lock(uint32_t is_locked) {
 		
 		} else {
 		ili9488_set_foreground_color(COLOR_CONVERT(COLOR_WHITE));
-		ili9488_draw_filled_rectangle(LOCK_X-LOCK_W/2, LOCK_Y-LOCK_H/2, LOCK_X+LOCK_W/2, LOCK_Y+LOCK_H/2);	
+		ili9488_draw_filled_rectangle(LOCK_X-LOCK_W/2, LOCK_Y-LOCK_H/2, LOCK_X+LOCK_W/2, LOCK_Y+LOCK_H/2);
 		ili9488_draw_pixmap(LOCK_X-32, LOCK_Y-32, lock.width, lock.height, lock.data);
 	}
 	
@@ -504,19 +674,30 @@ void draw_play_pause(Bool is_on){
 	
 	
 	if (!is_on){
-		
+		ili9488_set_foreground_color(COLOR_CONVERT(COLOR_WHITE));
+		ili9488_draw_filled_rectangle(100, 0, 320, 92);
 		ili9488_draw_pixmap(128, 410, Play.width, Play.height, Play.data);
+		
 	}
 	else {
 		
 		ili9488_draw_pixmap(128, 410, pause.width, pause.height, pause.data);
+		tempo=ciclo->enxagueTempo+ciclo->centrifugacaoTempo;
+		
+		ili9488_set_foreground_color(COLOR_CONVERT(COLOR_WHITE));
+		ili9488_draw_filled_rectangle(100, 60, 320, 52);
+		char buffer[32];
+		sprintf(buffer, "%d",tempo);
+		font_draw_text(&calibri_36, "Total:", 100, 60, 2);
+		font_draw_text(&calibri_36, buffer, 215, 60, 2);
+		font_draw_text(&calibri_36, "min", 260, 60, 2);
+		
 	}
 	
 	
 	
 	
 }
-
 
 uint32_t convert_axis_system_x(uint32_t touch_y) {
 	// entrada: 4096 - 0 (sistema de coordenadas atual)
@@ -529,6 +710,21 @@ uint32_t convert_axis_system_y(uint32_t touch_x) {
 	// saida: 0 - 320
 	return ILI9488_LCD_HEIGHT*touch_x/4096;
 }
+
+void update_timer(){
+	char bufferSeg[32];
+	char bufferMin[32];
+	
+	sprintf(bufferSeg, "%d",seg);
+	sprintf(bufferMin, "%d",minu);
+	
+	ili9488_set_foreground_color(COLOR_CONVERT(COLOR_WHITE));
+	ili9488_draw_filled_rectangle(175, 20, 300, 52);
+	
+	font_draw_text(&calibri_36, bufferMin, 175, 20, 2);
+	font_draw_text(&calibri_36, ":", 220, 20, 2);
+	font_draw_text(&calibri_36, bufferSeg, 245, 20, 2);
+	}
 
 void update_screen(uint32_t tx, uint32_t ty, uint32_t status) {
 	if(status==0x20){
@@ -547,15 +743,19 @@ void update_screen(uint32_t tx, uint32_t ty, uint32_t status) {
 			
 			if(tx >= NEXT_X-NEXT_W/2 && tx <= NEXT_X + NEXT_W/2){
 				if(ty >= NEXT_Y-NEXT_H/2 &&  ty <= NEXT_Y + NEXT_H/2){
-					draw_next(1);
-					draw_mode(1);
+					if (!is_on){
+						draw_next(1);
+						draw_mode(1);
+					}
 				}
 			}
 			
 			if(tx >= PREV_X-PREV_W/2 && tx <= PREV_X + PREV_W/2){
 				if(ty >= PREV_Y-PREV_H/2 &&  ty <= PREV_Y + PREV_H/2){
-					draw_prev(1);
-					draw_mode(1);
+					if (!is_on){
+						draw_prev(1);
+						draw_mode(1);
+					}
 				}
 			}
 
@@ -567,95 +767,107 @@ void update_screen(uint32_t tx, uint32_t ty, uint32_t status) {
 						ili9488_draw_pixmap(0, 0, porta.width, porta.height, porta.data);
 					}
 					else{
+						seg=0;
+						minu=0;
 						ili9488_set_foreground_color(COLOR_CONVERT(COLOR_WHITE));
-						ili9488_draw_filled_rectangle(0, 0,64, 64);
-						ili9488_draw_pixmap(0, 0, ON.width, ON.height, ON.data);
+						ili9488_draw_filled_rectangle(0, 0,320, 90);
 						
+						ili9488_draw_pixmap(0, 0, ON.width, ON.height, ON.data);
+						flag=!flag;
 						is_on =!is_on;
 						draw_play_pause(is_on);
 					}
+					
 				}
 				else {
 					/*PAUSE*/
-				
+					flag=!flag;
 					is_on =!is_on;
+					ili9488_set_foreground_color(COLOR_CONVERT(COLOR_WHITE));
+					ili9488_draw_filled_rectangle(0, 0,64, 64);
 					draw_play_pause(is_on);
+
 				}
 			}
 		}
 	}
 }
 
-	led_update(Bool porta_aberta){
-		if (porta_aberta){
-			pio_clear(LED_PIO, LED_IDX_MASK);
-		}
-		else {
-			pio_set(LED_PIO, LED_IDX_MASK);
-		}
-		
-	};
-	/*MAIN*/
-
-	int main(void)
-	{
-		struct mxt_device device; /* Device data container */
-		
-		/*INICIA O DETECTOR DA PORTA */
-		porta_aberta=1;
-		//safety =1 ;
-		//pmc_enable_periph_clk(PORTA_PIO_ID);
-		//pmc_enable_periph_clk(SAFE_PIO_ID);
-		//
-		//pio_configure(PORTA_PIO, PIO_INPUT, PORTA_IDX_MASK, PIO_PULLUP);
-		//pio_configure(SAFE_PIO, PIO_INPUT, SAFE_IDX_MASK, PIO_PULLUP);
-		
-		/* Initialize the USART configuration struct */
-		const usart_serial_options_t usart_serial_options = {
-			.baudrate     = USART_SERIAL_EXAMPLE_BAUDRATE,
-			.charlength   = USART_SERIAL_CHAR_LENGTH,
-			.paritytype   = USART_SERIAL_PARITY,
-			.stopbits     = USART_SERIAL_STOP_BIT
-		};
-		uint8_t stingLCD[256];
-		
-		sysclk_init(); /* Initialize system clocks */
-		board_init();  /* Initialize board */
-		io_init();
-		ioport_init();
-		
-		ciclo = initMenuOrder();
-		
-		configure_lcd();
-		configure_console();
-		
-		draw_screen();
-		draw_lock(1);
-		draw_next(0);
-		draw_prev(0);
-		draw_play_pause(0);
-		draw_mode(0);
-		
-		/* Initialize the mXT touch device */
-		mxt_init(&device);
-		
-		/* Initialize stdio on USART */
-		stdio_serial_init(USART_SERIAL_EXAMPLE, &usart_serial_options);
-
-
-		
-
-		while (true) {
-			/* Check for any pending messages and run message handler if any
-			* message is found in the queue */
-			
-			led_update(porta_aberta);
-			
-			if (mxt_is_message_pending(&device)) {
-				mxt_handler(&device);
-			}
-			//pmc_sleep(SAM_PM_SMODE_SLEEP_WFI);
-		}
-
-		return 0;
+void led_update(){
+	if (porta_aberta){
+		pio_clear(LED_PIO, LED_IDX_MASK);
 	}
+	else {
+		pio_set(LED_PIO, LED_IDX_MASK);
+	}
+	
+};
+/*MAIN*/
+
+int main(void)
+{
+	struct mxt_device device;
+	
+	/*INICIA O DETECTOR DA PORTA */
+	porta_aberta=1;
+	
+	f_rtt_alarme = true;
+	
+	/* Initialize the USART configuration struct */
+	const usart_serial_options_t usart_serial_options = {
+		.baudrate     = USART_SERIAL_EXAMPLE_BAUDRATE,
+		.charlength   = USART_SERIAL_CHAR_LENGTH,
+		.paritytype   = USART_SERIAL_PARITY,
+		.stopbits     = USART_SERIAL_STOP_BIT
+	};
+	uint8_t stingLCD[256];
+	
+	sysclk_init(); /* Initialize system clocks */
+	board_init();  /* Initialize board */
+	io_init();
+	ioport_init();
+	
+	ciclo = initMenuOrder();
+	
+	configure_lcd();
+	configure_console();
+	
+	draw_screen();
+	draw_lock(1);
+	draw_next(0);
+	draw_prev(0);
+	draw_play_pause(0);
+	draw_mode(0);
+	
+	/* Initialize the mXT touch device */
+	mxt_init(&device);
+	
+	/* Initialize stdio on USART */
+	stdio_serial_init(USART_SERIAL_EXAMPLE, &usart_serial_options);
+
+	rtc_set_date_alarm(RTC, 1, MOUNT, 1, DAY);
+	rtc_set_time_alarm(RTC, 1, HOUR, 1, MINUTE, 1, SECOND+2);
+	
+	TC_init(TC0, ID_TC1, 1, 1);
+	
+	while (true) {
+		/* Check for any pending messages and run message handler if any
+		* message is found in the queue */
+		//
+		//uint16_t pllPreScale = (int) (((float) 32768) / 2.0);
+		//uint32_t irqRTTvalue  = 2;
+		//RTT_init(pllPreScale, irqRTTvalue);
+		//
+
+		
+		//led_update(porta_aberta);
+		
+		if (mxt_is_message_pending(&device)) {
+			mxt_handler(&device);
+		}
+		
+		//pmc_sleep(SAM_PM_SMODE_SLEEP_WFI);
+	}
+
+	return 0;
+}
