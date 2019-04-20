@@ -250,7 +250,10 @@ void TC1_Handler(void){
 
 	if (minu==tempo)
 	{
+		Bool temp=is_locked;
+		is_locked =0;
 		update_screen(PLAY_X,PLAY_Y,0x20);
+		is_locked =temp;
 		font_draw_text(&calibri_36, "LAVAGEM ", 60, 10, 2);
 		font_draw_text(&calibri_36, "CONCLUIDA!", 60, 45, 2);
 	}
@@ -364,7 +367,7 @@ void TC_init(Tc * TC, int ID_TC, int TC_CHANNEL, int freq){
 	uint32_t channel = 1;
 
 	/* Configura o PMC */
-	/* O TimerCounter È meio confuso
+	/* O TimerCounter √© meio confuso
 	o uC possui 3 TCs, cada TC possui 3 canais
 	TC0 : ID_TC0, ID_TC1, ID_TC2
 	TC1 : ID_TC3, ID_TC4, ID_TC5
@@ -372,13 +375,13 @@ void TC_init(Tc * TC, int ID_TC, int TC_CHANNEL, int freq){
 	*/
 	pmc_enable_periph_clk(ID_TC);
 
-	/** Configura o TC para operar em  4Mhz e interrupÁc„o no RC compare */
+	/** Configura o TC para operar em  4Mhz e interrup√ßc√£o no RC compare */
 	tc_find_mck_divisor(freq, ul_sysclk, &ul_div, &ul_tcclks, ul_sysclk);
 	tc_init(TC, TC_CHANNEL, ul_tcclks | TC_CMR_CPCTRG);
 	tc_write_rc(TC, TC_CHANNEL, (ul_sysclk / ul_div) / freq);
 
-	/* Configura e ativa interrupÁc„o no TC canal 0 */
-	/* InterrupÁ„o no C */
+	/* Configura e ativa interrup√ßc√£o no TC canal 0 */
+	/* Interrup√ß√£o no C */
 	NVIC_EnableIRQ((IRQn_Type) ID_TC);
 	tc_enable_interrupt(TC, TC_CHANNEL, TC_IER_CPCS);
 
@@ -578,7 +581,7 @@ static void RTT_init(uint16_t pllPreScale, uint32_t IrqNPulses)
 	rtt_enable_interrupt(RTT, RTT_MR_ALMIEN);
 }
 /************************************************************************/
-/* funÁıes                                                              */
+/* fun√ß√µes                                                              */
 /************************************************************************/
 
 static float get_time_rtt(){
